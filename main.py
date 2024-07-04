@@ -41,6 +41,17 @@ class PredictionInput(BaseModel):
             raise ValueError(f'Merchant ID {v} is not allowed')
         return v
 
+@app.get("/options/", summary="Get Allowed Merchant IDs and Feature List")
+async def get_options():
+    """
+    Get the allowed merchant IDs and the required features for the prediction.
+    """
+    required_features = [col for col in model.feature_names_in_ if col not in ['merchant_id', 'transaction_date']]
+    return {
+        "allowed_merchant_ids": list(ALLOWED_MERCHANT_IDS),
+        "required_features": required_features
+    }
+
 @app.post("/predict/", summary="Predict Total Paid", response_description="Predicted total paid for the given merchant ID and transaction date")
 async def predict(input_data: PredictionInput):
     """
@@ -50,16 +61,16 @@ async def predict(input_data: PredictionInput):
         # Convert the input features to a DataFrame
         input_df = pd.DataFrame([input_data.features])
 
-        # Ensure the input data has the correct columns
-        required_columns = model.get_params()['fit_intercept']
-        if not all(column in input_df.columns for column in required_columns):
-            missing_cols = list(set(required_columns) - set(input_df.columns))
-            logger.warning(f"Missing columns in input data: {missing_cols}")
-            raise HTTPException(status_code=400, detail=f"Missing columns in input data: {missing_cols}")
-
         # Add merchant_id and transaction_date to input_df for the prediction
         input_df['merchant_id'] = input_data.merchant_id
         input_df['transaction_date'] = input_data.transaction_date
+
+        # Ensure the input data has the correct columns
+        required_columns = model.feature_names_in_
+        missing_cols = [col for col in required_columns if col not in input_df.columns]
+        if missing_cols:
+            logger.warning(f"Missing columns in input data: {missing_cols}")
+            raise HTTPException(status_code=400, detail=f"Missing columns in input data: {missing_cols}")
 
         # Make predictions
         predictions = model.predict(input_df)
