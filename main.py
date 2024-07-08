@@ -1,96 +1,104 @@
-# main.py
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, validator
-from typing import List, Dict, Any
-from datetime import date
-import pandas as pd
+#main.py
+from fastapi import FastAPI, HTTPException, Header
+from pydantic import BaseModel, Field
 import pickle
-import logging
+import pandas as pd
+import numpy as np
+from datetime import datetime
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Load the trained LightGBM model
+with open('lightgbm_model.pkl', 'rb') as file:
+    model = pickle.load(file)
 
-app = FastAPI(title="Transaction Prediction API", description="API to predict total paid based on merchant ID and transaction date", version="1.0")
-
-# Load the model
-try:
-    with open('transaction_model.pkl', 'rb') as file:
-        model = pickle.load(file)
-    logger.info("Model loaded successfully.")
-except FileNotFoundError:
-    logger.error("Pickle file not found.")
-    raise HTTPException(status_code=404, detail="Pickle file not found")
-except Exception as e:
-    logger.error(f"Error loading Pickle file: {e}")
-    raise HTTPException(status_code=500, detail="Error loading Pickle file")
-
-# Allowed merchant IDs
-ALLOWED_MERCHANT_IDS = {535, 42616, 46774, 57192, 86302, 124381, 129316}
+# Initialize FastAPI app
+app = FastAPI()
 
 # Define the input data model
-class PredictionInput(BaseModel):
-    merchant_id: int
-    transaction_date: date
-    features: Dict[str, Any]
+class TransactionInput(BaseModel):
+    transaction_date: str = Field(..., example="2024-07-01")
+    merchant_id: int = Field(..., example=535)
 
-    @validator('merchant_id')
-    def check_merchant_id(cls, v):
-        if v not in ALLOWED_MERCHANT_IDS:
-            raise ValueError(f'Merchant ID {v} is not allowed')
-        return v
+# Ensure merchant_id is one of the allowed values
+ALLOWED_MERCHANT_IDS = {535, 42616, 46774, 57192, 86302, 124381, 129316}
 
-@app.get("/options/", summary="Get Allowed Merchant IDs and Feature List")
-async def get_options():
-    """
-    Get the allowed merchant IDs and the required features for the prediction.
-    """
-    required_features = [col for col in model.feature_names_in_ if col not in ['merchant_id', 'transaction_date']]
-    return {
-        "allowed_merchant_ids": list(ALLOWED_MERCHANT_IDS),
-        "required_features": required_features
+# List of all feature columns used during training
+FEATURE_COLUMNS = [ 
+'merchant_id',	'Price	month',	'day_of_month','day_of_year','week_of_year',	'is_wknd',	
+'is_month_start',	'is_month_end',	'sales_lag_91',	'sales_lag_120',	'sales_lag_152',	
+'sales_lag_182',	'sales_lag_242',	'sales_lag_402',	'sales_lag_542',	'sales_lag_722',
+'sales_roll_mean_91',	'sales_roll_mean_120',	'sales_roll_mean_152',	'sales_roll_mean_182',
+'sales_roll_mean_242',	'sales_roll_mean_402',	'sales_roll_mean_542',	'sales_roll_mean_722',
+'sales_ewm_alpha_095_lag_91',	'sales_ewm_alpha_095_lag_120',	'sales_ewm_alpha_095_lag_152',	
+'sales_ewm_alpha_095_lag_182',	'sales_ewm_alpha_095_lag_242',	'sales_ewm_alpha_095_lag_402',
+'sales_ewm_alpha_095_lag_542',	'sales_ewm_alpha_095_lag_722',	'sales_ewm_alpha_09_lag_91',
+'sales_ewm_alpha_09_lag_120',	'sales_ewm_alpha_09_lag_152',	'sales_ewm_alpha_09_lag_182',
+'sales_ewm_alpha_09_lag_242',	'sales_ewm_alpha_09_lag_402',	'sales_ewm_alpha_09_lag_542',	
+'sales_ewm_alpha_09_lag_722',	'sales_ewm_alpha_08_lag_91',	'sales_ewm_alpha_08_lag_120',	
+'sales_ewm_alpha_08_lag_152',	'sales_ewm_alpha_08_lag_182',	'sales_ewm_alpha_08_lag_242',	
+'sales_ewm_alpha_08_lag_402',	'sales_ewm_alpha_08_lag_542',	'sales_ewm_alpha_08_lag_722',
+'sales_ewm_alpha_07_lag_91',	'sales_ewm_alpha_07_lag_120',	'sales_ewm_alpha_07_lag_152',
+'sales_ewm_alpha_07_lag_182',	'sales_ewm_alpha_07_lag_242',	'sales_ewm_alpha_07_lag_402',	
+'sales_ewm_alpha_07_lag_542',	'sales_ewm_alpha_07_lag_722',	'sales_ewm_alpha_05_lag_91',
+'sales_ewm_alpha_05_lag_120',	'sales_ewm_alpha_05_lag_152',	'sales_ewm_alpha_05_lag_182',
+'sales_ewm_alpha_05_lag_242',	'sales_ewm_alpha_05_lag_402',	'sales_ewm_alpha_05_lag_542',
+'sales_ewm_alpha_05_lag_722',	'day_of_week_0',	'day_of_week_1',	'day_of_week_2',	
+'day_of_week_3',	'day_of_week_4',	'day_of_week_5',	'day_of_week_6',	'year_2018',	
+'year_2019',	'year_2020'
+]
+
+async def enforce_exact_merchant_ids(merchant_id: int = Header(..., description="Merchant ID")):
+    if merchant_id not in ALLOWED_MERCHANT_IDS:
+        raise HTTPException(status_code=400, detail=f"Invalid merchant_id. Allowed IDs are: {ALLOWED_MERCHANT_IDS}")
+
+@app.post("/predict")
+async def predict(input_data: TransactionInput):
+    # Validate merchant_id
+    if input_data.merchant_id not in ALLOWED_MERCHANT_IDS:
+        raise HTTPException(status_code=400, detail="Invalid merchant_id")
+
+    # Convert transaction_date to datetime and extract features
+    try:
+        transaction_date = datetime.strptime(input_data.transaction_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    # Example feature extraction
+    year = transaction_date.year
+    month = transaction_date.month
+    day = transaction_date.day
+    weekday = transaction_date.weekday()
+
+    # Prepare the input data for prediction with all required features
+    input_features = {
+        'merchant_id': input_data.merchant_id,
+        'year': year,
+        'month': month,
+        'day': day,
+        'weekday': weekday,
     }
 
-@app.post("/predict/", summary="Predict Total Paid", response_description="Predicted total paid for the given merchant ID and transaction date")
-async def predict(input_data: PredictionInput):
-    """
-    Predict the total paid for the given merchant ID and transaction date.
-    """
-    try:
-        # Convert the input features to a DataFrame
-        input_df = pd.DataFrame([input_data.features])
+    # Fill missing features with default values (e.g., zero)
+    for feature in FEATURE_COLUMNS:
+        if feature not in input_features:
+            input_features[feature] = 0
 
-        # Add merchant_id and transaction_date to input_df for the prediction
-        input_df['merchant_id'] = input_data.merchant_id
-        input_df['transaction_date'] = input_data.transaction_date
+    # Ensure the order of features matches the training data
+    input_df = pd.DataFrame([input_features], columns=FEATURE_COLUMNS)
 
-        # Ensure the input data has the correct columns
-        required_columns = model.feature_names_in_
-        missing_cols = [col for col in required_columns if col not in input_df.columns]
-        if missing_cols:
-            logger.warning(f"Missing columns in input data: {missing_cols}")
-            raise HTTPException(status_code=400, detail=f"Missing columns in input data: {missing_cols}")
+    # Make predictions
+    predictions = model.predict(input_df, predict_disable_shape_check=True)
 
-        # Make predictions
-        predictions = model.predict(input_df)
-        
-        # Return the prediction with merchant_id and transaction_date
-        result = {
-            "merchant_id": input_data.merchant_id,
-            "transaction_date": input_data.transaction_date,
-            "Total_Paid": predictions[0]
-        }
-        
-        logger.info(f"Returning result for merchant ID {input_data.merchant_id} and transaction date {input_data.transaction_date}: {result}")
-        return result
+    # Print predictions for debugging
+    print("Shape of predictions:", predictions.shape)
+    print("Content of predictions:", predictions)
+
+    # Convert predictions to required format
+    total_paid_pred = np.expm1(predictions[0])  # Assuming predictions is a scalar or single-element array
+
+
+    return {
+        "Total_Paid": total_paid_pred
+    }
+
     
-    except ValueError as ve:
-        logger.error(f"Value error during processing: {ve}")
-        raise HTTPException(status_code=400, detail=f"Value error during processing: {ve}")
-    
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
-
 # To run the app, use the command: python -m uvicorn main:app --reload
